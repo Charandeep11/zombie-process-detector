@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# detector.sh
+# Detect zombie (defunct) processes and optionally attempt safe cleanup.
+# Usage: ./detector.sh [--cleanup] [--force] [--quiet]
+
+
+set -eo pipefail
+
+
+CLEANUP=0
+FORCE=0
+QUIET=0
+
+
+while [[ $# -gt 0 ]]; do
+case "$1" in
+--cleanup) CLEANUP=1; shift ;;
+--force) FORCE=1; shift ;;
+--quiet) QUIET=1; shift ;;
+-h|--help)
+cat <<'EOF'
+Usage: detector.sh [--cleanup] [--force] [--quiet]
+--cleanup Attempt safe cleanup by signalling parent processes
+--force If cleanup fails, optionally attempt to terminate parent (dangerous)
+--quiet Minimal output
+EOF
+exit 0
+;;
+*) echo "Unknown option: $1"; exit 2 ;;
+esac
+done
+
+
+report_zombies() {
+# Print table header
+if [[ $QUIET -eq 0 ]]; then
+printf "%6s %6s %4s %-6s %s\n" PID PPID STAT SESS CMD
+printf '%s\n' "----------------------------------------------------------------------"
+fi
+
+
+# Using ps to find processes with STAT containing 'Z' (zombie).
+# Format: PID PPID STAT SID CMD
+ps -eo pid=,ppid=,stat=,sid=,cmd= | awk '$3 ~ /Z/ { printf "%6s %6s %4s %6s %s\n", $1, $2, $3, $4, substr($0, index($0,$5)) }'
+}
+
+
+attempt_cleanup() {
+local zid pid ppid stat sid cmd
+# iterate over zombies found
+while read -r pid ppid stat sid cmd; do
+# pid and ppid come as strings with leading spaces; trim
+pid=$(echo "$pid" | tr -d '[:space:]')
+ppid=$(echo "$ppid" | tr -d '[:space:]')
+
+
+if [[ -z "$pid" ]]; then continue; fi
+
+
+echo "\n[+] Zombie: PID=$pid PPID=$ppid STAT=$stat CMD=$cmd"
+
+
+# 1) Try to notify the parent to reap children: send SIGCHLD
+if kill -0 "$ppid" 2>/dev/null; then
+echo " -> sending SIGCHLD to parent (PID $ppid)"
+if kill -SIGCHLD "$ppid" 2>/dev/null; then
+sleep 1
+if ps -p "$pid" -o stat= | grep -q Z; then
+echo " -> still defunct after SIGCHLD"
+else
+echo " -> reaped successfully"
+continue
+fi
+else
+main
